@@ -1,76 +1,59 @@
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
-from database import SessionLocal, TaskDB
-from pydantic import BaseModel
+
+import models
+import schemas
+from database import engine, get_db
+
+# Автоматически создаем таблицы в базе при старте сервера, если их еще нет
+models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="TaskFlow Database Server")
 
 
-# Вспомогательная функция: подключается к базе данных
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-# Схема валидации (Pydantic) для создания задачи
-class TaskCreate(BaseModel):
-    title: str
-    completed: bool = False
-
-
-# 1. ПОЛУЧИТЬ ВСЕ ЗАДАЧИ (Новые сверху!)
-@app.get("/tasks")
+# 1. ПОЛУЧИТЬ ВСЕ ЗАДАЧИ (Новые сверху)
+@app.get("/tasks", response_model=list[schemas.TaskResponse])
 def get_tasks(db: Session = Depends(get_db)):
-    # .order_by(TaskDB.id.desc()) сортирует задачи от самой новой к самой старой
-    tasks = db.query(TaskDB).order_by(TaskDB.id.desc()).all()
-    return tasks
+    return db.query(models.TaskDB).order_by(models.TaskDB.id.desc()).all()
 
 
-# 2. СОЗДАТЬ НОВУЮ ЗАДАЧУ (POST)
-@app.post("/tasks", status_code=201)
-def create_task(task_data: TaskCreate, db: Session = Depends(get_db)):
-    # Создаем объект нашей табличной модели для записи в базу
-    new_task = TaskDB(title=task_data.title, completed=task_data.completed)
-    
-    db.add(new_task)       # Добавляем в сессию
-    db.commit()            # Сохраняем на жесткий диск в tasks.db
-    db.refresh(new_task)   # Обновляем объект (чтобы база вернула присвоенный ID)
-    
+# 2. СОЗДАТЬ НОВУЮ ЗАДАЧУ
+@app.post("/tasks", status_code=201, response_model=schemas.TaskResponse)
+def create_task(task_data: schemas.TaskCreate, db: Session = Depends(get_db)):
+    new_task = models.TaskDB(title=task_data.title, completed=task_data.completed)
+    db.add(new_task)
+    db.commit()
+    db.refresh(new_task)
     return new_task
 
 
-# 3. ПОЛУЧИТЬ ОДНУ ЗАДАЧУ ПО ID (GET)
-@app.get("/tasks/{task_id}")
+# 3. ПОЛУЧИТЬ ОДНУ ЗАДАЧУ ПО ID
+@app.get("/tasks/{task_id}", response_model=schemas.TaskResponse)
 def get_single_task(task_id: int, db: Session = Depends(get_db)):
-    task = db.query(TaskDB).filter(TaskDB.id == task_id).first()
+    task = db.query(models.TaskDB).filter(models.TaskDB.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="Задача с таким ID не найдена")
     return task
 
 
-# 4. ПОЛНОЕ ОБНОВЛЕНИЕ ЗАДАЧИ (PUT — меняем и название, и статус)
-@app.put("/tasks/{task_id}")
-def update_task(task_id: int, updated_data: TaskCreate, db: Session = Depends(get_db)):
-    task = db.query(TaskDB).filter(TaskDB.id == task_id).first()
+# 4. ПОЛНОЕ ОБНОВЛЕНИЕ ЗАДАЧИ
+@app.put("/tasks/{task_id}", response_model=schemas.TaskResponse)
+def update_task(task_id: int, updated_data: schemas.TaskCreate, db: Session = Depends(get_db)):
+    task = db.query(models.TaskDB).filter(models.TaskDB.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="Задача с таким ID не найдена")
     
-    # Обновляем оба поля тем, что прислал пользователь:
     task.title = updated_data.title
     task.completed = updated_data.completed
-    
-    db.commit()          # Сохраняем изменения в файл tasks.db
-    db.refresh(task)     # Обновляем карточку
+    db.commit()
+    db.refresh(task)
     return task
 
 
-# 5. УДАЛИТЬ ЗАДАЧУ (DELETE)
+# 5. УДАЛИТЬ ЗАДАЧУ
 @app.delete("/tasks/{task_id}")
 def delete_task(task_id: int, db: Session = Depends(get_db)):
-    task = db.query(TaskDB).filter(TaskDB.id == task_id).first()
+    task = db.query(models.TaskDB).filter(models.TaskDB.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="Задача с таким ID не найдена")
     
@@ -78,27 +61,25 @@ def delete_task(task_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"message": f"Задача #{task_id} успешно удалена!"}
 
-# 6. ФИЛЬТР ПО СТАТУСУ ЧЕРЕЗ БАЗУ ДАННЫХ (GET)
-@app.get("/tasks/filter/status")
+
+# 6. ФИЛЬТР ПО СТАТУСУ
+@app.get("/tasks/filter/status", response_model=list[schemas.TaskResponse])
 def filter_by_status(completed: bool, db: Session = Depends(get_db)):
-    # База сама отбирает только те строки, где колонка completed совпадает с запросом
-    tasks = db.query(TaskDB).filter(TaskDB.completed == completed).all()
-    return tasks
+    return db.query(models.TaskDB).filter(models.TaskDB.completed == completed).all()
 
 
-# 7. ПОИСК ЗАДАЧ ПО СЛОВУ В НАЗВАНИИ (GET)
-@app.get("/tasks/search/title")
+# 7. ПОИСК ПО СЛОВУ В НАЗВАНИИ
+@app.get("/tasks/search/title", response_model=list[schemas.TaskResponse])
 def search_tasks(keyword: str, db: Session = Depends(get_db)):
-    # Команда .contains(keyword) ищет задачи, внутри названия которых есть нужное слово
-    tasks = db.query(TaskDB).filter(TaskDB.title.contains(keyword)).all()
-    return tasks
+    return db.query(models.TaskDB).filter(models.TaskDB.title.contains(keyword)).all()
 
-# 8. СТАТИСТИКА ЗАДАЧ (GET)
+
+# 8. СТАТИСТИКА ЗАДАЧ
 @app.get("/tasks/stats/count")
 def get_tasks_stats(db: Session = Depends(get_db)):
-    total = db.query(TaskDB).count()
-    completed = db.query(TaskDB).filter(TaskDB.completed == True).count()
-    pending = db.query(TaskDB).filter(TaskDB.completed == False).count()  
+    total = db.query(models.TaskDB).count()
+    completed = db.query(models.TaskDB).filter(models.TaskDB.completed == True).count()
+    pending = total - completed
     return {
         "total_tasks": total,
         "completed_tasks": completed,
